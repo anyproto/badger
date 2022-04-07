@@ -19,10 +19,12 @@ package badger
 import (
 	"bytes"
 	"fmt"
+	"github.com/dgraph-io/badger/v3/options"
 	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -481,6 +483,228 @@ func TestValueGC4(t *testing.T) {
 	require.NoError(t, kv.Close())
 }
 
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const (
+	letterIdxBits = 6
+	letterIdxMask = 1<<letterIdxBits - 1
+	letterIdxMax  = 63 / letterIdxBits
+)
+
+type Metrics struct {
+	NumSST    int
+	SizeSSTs  int64
+	NumVLOG   int
+	SizeVLOGs int64
+}
+
+func TestValueGC5(t *testing.T) {
+	type args struct {
+		options Options
+		itemsToAdd int
+		itemShouldBeRemoved func(i int) bool
+		itemSize int
+		addBatchSize int
+		addIteration int
+		deleteBatchSize int
+		gcDiscardRatio  float64
+		gcMaxIterations int
+		wholeIterations int
+	}
+	
+	tests := []struct {
+		name        string
+		args        args
+		totalDiskSize int
+		totalDiskSizeOverhead float64
+		totalDiskSizeAfterRemove int
+	}{
+		{
+			name:                     "t1",
+			args:                     args{
+				options:         
+					LSMOnlyOptions(filepath.Join(os.TempDir(),"badger_gc_test1")).
+					WithCompression(options.None).
+					WithValueLogFileSize(1024*1024*64),
+				itemsToAdd:     300,
+				itemShouldBeRemoved: func(i int) bool {
+					return i%2 == 0
+				},
+				itemSize:        512*1024,
+				addBatchSize:    10,
+				addIteration:    3,
+				deleteBatchSize: 100,
+				gcDiscardRatio:  0.00001,
+				gcMaxIterations: 10,
+			},
+			totalDiskSize:            419452623,
+			totalDiskSizeOverhead: 0.01,
+			totalDiskSizeAfterRemove: 419452623,
+		},
+		{
+			name:                     "t2",
+			args:                     args{
+				options:         
+					DefaultOptions(filepath.Join(os.TempDir(),"badger_gc_test2")).
+					WithCompression(options.None).
+					WithValueThreshold(1024).
+					WithValueLogFileSize(1024*1024*64),
+				itemsToAdd:     1000,
+				itemShouldBeRemoved: func(i int) bool {
+					return true
+				},
+				itemSize:        512*1024,
+				addBatchSize:    10,
+				addIteration:    2,
+				deleteBatchSize: 100,
+				gcDiscardRatio:  0.3,
+				gcMaxIterations: 100,
+				wholeIterations: 5,
+			},
+			totalDiskSize:            419452623,
+			totalDiskSizeOverhead: 0.01,
+			totalDiskSizeAfterRemove: 419452623,
+		},
+	}
+
+	getMetrics := func(path string) (m Metrics, err error) {
+		err = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			ext := filepath.Ext(info.Name())
+			switch ext {
+			case ".sst":
+				m.NumSST++
+				m.SizeSSTs += info.Size() / 1024
+			case ".vlog":
+				m.NumVLOG++
+				m.SizeVLOGs += info.Size() / 1024
+			}
+			return nil
+		})
+		return
+	}
+
+	var txn *Txn
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := Open(tt.args.options)
+			require.NoError(t, err)
+			defer os.RemoveAll(db.Opts().Dir)
+			for k:=0; k<tt.args.wholeIterations; k ++ {
+				dir := db.Opts().Dir
+
+				for j := 0; j < tt.args.addIteration; j++ {
+					t.Logf("Add itertaion %d", j)
+					for i := 0; i < tt.args.itemsToAdd; i++ {
+						if i%tt.args.addBatchSize == 0 {
+							if i != 0 {
+								err = txn.Commit()
+								time.Sleep(time.Millisecond * 300)
+								require.NoError(t, err)
+							}
+							txn = db.NewTransaction(true)
+						}
+						err = txn.Set([]byte(fmt.Sprintf("%028d", i)), []byte(randString(tt.args.itemSize)))
+						require.NoError(t, err)
+					}
+					err = txn.Commit()
+					t.Logf("added %d keys", tt.args.addIteration)
+				}
+
+				require.NoError(t, err)
+				err = db.Sync()
+				require.NoError(t, err)
+				db.Close()
+				m, err := getMetrics(dir)
+				require.NoError(t, err)
+				t.Logf("Metrics step 1, after ADD: %+v\n", m)
+
+				db, err = Open(tt.args.options)
+				require.NoError(t, err)
+
+				var removed int
+				for i := 0; i < tt.args.itemsToAdd; i++ {
+					if !tt.args.itemShouldBeRemoved(i) {
+						continue
+					}
+					if removed%tt.args.deleteBatchSize == 0 {
+						if i != 0 {
+							err = txn.Commit()
+							require.NoError(t, err)
+						}
+						txn = db.NewTransaction(true)
+					}
+					removed++
+					fmt.Printf("remove %s\n", fmt.Sprintf("%028d", i))
+					err = txn.Delete([]byte(fmt.Sprintf("%028d", i)))
+					require.NoError(t, err)
+				}
+				t.Logf("removed %d keys", removed)
+				err = txn.Commit()
+				//db.SetDiscardTs(uint64(time.Now().Unix()))
+				m, err = getMetrics(dir)
+				require.NoError(t, err)
+				t.Logf("Metrics step 2, after DELETE: %+v\n", m)
+				require.NoError(t, db.Sync())
+				//	require.NoError(t,db.Close())
+
+				var txn *Txn
+				for i := 0; i < tt.args.itemsToAdd; i++ {
+					txn = db.NewTransaction(false)
+					item, err := txn.Get([]byte(fmt.Sprintf("%028d", i)))
+					require.Error(t, err, ErrKeyNotFound)
+					require.Nil(t, item)
+					txn.Discard()
+				}
+				//	db, err = Open(tt.args.options)
+				//	err = db.Flatten(3)
+				//	require.NoError(t, err)
+				//	t.Logf("Metrics step 2, after FLATTEN: %+v\n", m)
+
+				for i := 0; i < tt.args.gcMaxIterations; i++ {
+					err = db.RunValueLogGC(tt.args.gcDiscardRatio)
+					if err == ErrNoRewrite {
+						break
+					}
+					require.NoError(t, err)
+					t.Logf("gc succeed")
+					t.Logf("Metrics step 3, after GC: %+v\n", m)
+				}
+
+				m, err = getMetrics(dir)
+				require.NoError(t, err)
+				t.Logf("Metrics step 4, after all GC: %+v\n", m)
+
+				require.Greater(t, int64(db.Opts().MemTableSize+db.Opts().ValueLogFileSize*2), int64(float64(m.SizeVLOGs)*(1-tt.totalDiskSizeOverhead)))
+				require.Less(t, int64(db.Opts().MemTableSize+db.Opts().ValueLogFileSize*2), int64(float64(tt.totalDiskSize)*(1+tt.totalDiskSizeOverhead)))
+			}
+			err = db.Close()
+			require.NoError(t, err)
+		})
+	}
+}
+
+func randString(n int) string {
+	b := make([]byte, n)
+	for i, cache, remain := n-1, rand.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = rand.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+
+	return string(b)
+}
 func TestPersistLFDiscardStats(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger-test")
 	require.NoError(t, err)
