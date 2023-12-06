@@ -382,12 +382,13 @@ func (w *sortedWriter) send(done bool) error {
 	if err := w.throttle.Do(); err != nil {
 		return err
 	}
+
+	builder := w.builder
 	w.db._go(func() {
-		func(builder *table.Builder) {
-			err := w.createTable(builder)
-			w.throttle.Done(err)
-		}(w.builder)
+		err := w.createTable(builder)
+		w.throttle.Done(err)
 	})
+
 	// If done is true, this indicates we can close the writer.
 	// No need to allocate underlying TableBuilder now.
 	if done {

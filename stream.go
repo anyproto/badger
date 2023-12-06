@@ -406,17 +406,16 @@ func (st *Stream) Orchestrate(ctx context.Context) error {
 	for i := 0; i < st.NumGo; i++ {
 		wg.Add(1)
 
+		threadId := i
 		st.db._go(func() {
-			func(threadId int) {
-				defer wg.Done()
-				// Picks up ranges from rangeCh, generates KV lists, and sends them to kvChan.
-				if err := st.produceKVs(ctx, threadId); err != nil {
-					select {
-					case errCh <- err:
-					default:
-					}
+			defer wg.Done()
+			// Picks up ranges from rangeCh, generates KV lists, and sends them to kvChan.
+			if err := st.produceKVs(ctx, threadId); err != nil {
+				select {
+				case errCh <- err:
+				default:
 				}
-			}(i)
+			}
 		})
 	}
 

@@ -957,8 +957,9 @@ func (db *DB) doWrites(lc *z.Closer) {
 		}
 
 	writeCase:
+		_reqs := reqs
 		db._go(func() {
-			writeRequests(reqs)
+			writeRequests(_reqs)
 		})
 		reqs = make([]*request, 0, 10)
 		reqLen.Set(0)

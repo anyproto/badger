@@ -112,6 +112,7 @@ func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 	defer tick.Stop()
 
 	for fileID, tf := range mf.Tables {
+		tf := tf
 		fname := table.NewFilename(fileID, db.opt.Dir)
 		select {
 		case <-tick.C:
@@ -127,43 +128,41 @@ func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 			maxFileID = fileID
 		}
 		db._go(func() {
-			func(fname string, tf TableManifest) {
-				var rerr error
-				defer func() {
-					throttle.Done(rerr)
-					atomic.AddInt32(&numOpened, 1)
-				}()
-				dk, err := db.registry.DataKey(tf.KeyID)
-				if err != nil {
-					rerr = y.Wrapf(err, "Error while reading datakey")
-					return
-				}
-				topt := buildTableOptions(db)
-				// Explicitly set Compression and DataKey based on how the table was generated.
-				topt.Compression = tf.Compression
-				topt.DataKey = dk
+			var rerr error
+			defer func() {
+				throttle.Done(rerr)
+				atomic.AddInt32(&numOpened, 1)
+			}()
+			dk, err := db.registry.DataKey(tf.KeyID)
+			if err != nil {
+				rerr = y.Wrapf(err, "Error while reading datakey")
+				return
+			}
+			topt := buildTableOptions(db)
+			// Explicitly set Compression and DataKey based on how the table was generated.
+			topt.Compression = tf.Compression
+			topt.DataKey = dk
 
-				mf, err := z.OpenMmapFile(fname, db.opt.getFileFlags(), 0)
-				if err != nil {
-					rerr = y.Wrapf(err, "Opening file: %q", fname)
-					return
+			mf, err := z.OpenMmapFile(fname, db.opt.getFileFlags(), 0)
+			if err != nil {
+				rerr = y.Wrapf(err, "Opening file: %q", fname)
+				return
+			}
+			t, err := table.OpenTable(mf, topt)
+			if err != nil {
+				if strings.HasPrefix(err.Error(), "CHECKSUM_MISMATCH:") {
+					db.opt.Errorf(err.Error())
+					db.opt.Errorf("Ignoring table %s", mf.Fd.Name())
+					// Do not set rerr. We will continue without this table.
+				} else {
+					rerr = y.Wrapf(err, "Opening table: %q", fname)
 				}
-				t, err := table.OpenTable(mf, topt)
-				if err != nil {
-					if strings.HasPrefix(err.Error(), "CHECKSUM_MISMATCH:") {
-						db.opt.Errorf(err.Error())
-						db.opt.Errorf("Ignoring table %s", mf.Fd.Name())
-						// Do not set rerr. We will continue without this table.
-					} else {
-						rerr = y.Wrapf(err, "Opening table: %q", fname)
-					}
-					return
-				}
+				return
+			}
 
-				mu.Lock()
-				tables[tf.Level] = append(tables[tf.Level], t)
-				mu.Unlock()
-			}(fname, tf)
+			mu.Lock()
+			tables[tf.Level] = append(tables[tf.Level], t)
+			mu.Unlock()
 		})
 	}
 	if err := throttle.Finish(); err != nil {
@@ -353,6 +352,7 @@ func (s *levelsController) startCompact(lc *z.Closer) {
 	n := s.kv.opt.NumCompactors
 	lc.AddRunning(n - 1)
 	for i := 0; i < n; i++ {
+		i := i
 		s.kv._go(func() {
 			s.runCompactor(i, lc)
 		})
@@ -837,26 +837,26 @@ func (s *levelsController) subcompact(it y.Iterator, kr keyRange, cd compactDef,
 			// Can't return from here, until I decrRef all the tables that I built so far.
 			break
 		}
+
+		fileID := s.reserveFileID()
 		s.kv._go(func() {
-			func(builder *table.Builder, fileID uint64) {
-				var err error
-				defer inflightBuilders.Done(err)
-				defer builder.Close()
+			var err error
+			defer inflightBuilders.Done(err)
+			defer builder.Close()
 
-				var tbl *table.Table
-				if s.kv.opt.InMemory {
-					tbl, err = table.OpenInMemoryTable(builder.Finish(), fileID, &bopts)
-				} else {
-					fname := table.NewFilename(fileID, s.kv.opt.Dir)
-					tbl, err = table.CreateTable(fname, builder)
-				}
+			var tbl *table.Table
+			if s.kv.opt.InMemory {
+				tbl, err = table.OpenInMemoryTable(builder.Finish(), fileID, &bopts)
+			} else {
+				fname := table.NewFilename(fileID, s.kv.opt.Dir)
+				tbl, err = table.CreateTable(fname, builder)
+			}
 
-				// If we couldn't build the table, return fast.
-				if err != nil {
-					return
-				}
-				res <- tbl
-			}(builder, s.reserveFileID())
+			// If we couldn't build the table, return fast.
+			if err != nil {
+				return
+			}
+			res <- tbl
 		})
 	}
 	s.kv.vlog.updateDiscardStats(discardStats)
@@ -913,18 +913,18 @@ func (s *levelsController) compactBuildTables(
 	res := make(chan *table.Table, 3)
 	inflightBuilders := y.NewThrottle(8 + len(cd.splits))
 	for _, kr := range cd.splits {
+		kr := kr
+
 		// Initiate Do here so we can register the goroutines for buildTables too.
 		if err := inflightBuilders.Do(); err != nil {
 			s.kv.opt.Errorf("cannot start subcompaction: %+v", err)
 			return nil, nil, err
 		}
 		s.kv._go(func() {
-			func(kr keyRange) {
-				defer inflightBuilders.Done(nil)
-				it := table.NewMergeIterator(newIterator(), false)
-				defer it.Close()
-				s.subcompact(it, kr, cd, inflightBuilders, res)
-			}(kr)
+			defer inflightBuilders.Done(nil)
+			it := table.NewMergeIterator(newIterator(), false)
+			defer it.Close()
+			s.subcompact(it, kr, cd, inflightBuilders, res)
 		})
 	}
 
