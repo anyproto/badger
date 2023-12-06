@@ -25,6 +25,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -186,6 +187,15 @@ func checkAndSetOptions(opt *Options) error {
 
 // Open returns a new DB object.
 func Open(opt Options) (*DB, error) {
+	if opt.PanicHandler != nil {
+		defer func() {
+			if r := recover(); r != nil {
+				r = fmt.Sprintf("%v\n%s", r, string(debug.Stack()))
+				opt.PanicHandler(r)
+			}
+		}()
+	}
+
 	if err := checkAndSetOptions(&opt); err != nil {
 		return nil, err
 	}
@@ -308,7 +318,9 @@ func Open(opt Options) (*DB, error) {
 	}
 
 	db.closers.cacheHealth = z.NewCloser(1)
-	go db.monitorCache(db.closers.cacheHealth)
+	db._go(func() {
+		db.monitorCache(db.closers.cacheHealth)
+	})
 
 	if db.opt.InMemory {
 		db.opt.SyncWrites = false
@@ -328,7 +340,9 @@ func Open(opt Options) (*DB, error) {
 	}
 	db.calculateSize()
 	db.closers.updateSize = z.NewCloser(1)
-	go db.updateSize(db.closers.updateSize)
+	db._go(func() {
+		db.updateSize(db.closers.updateSize)
+	})
 
 	if err := db.openMemTables(db.opt); err != nil {
 		return nil, y.Wrapf(err, "while opening memtables")
@@ -353,9 +367,9 @@ func Open(opt Options) (*DB, error) {
 		db.lc.startCompact(db.closers.compactors)
 
 		db.closers.memtable = z.NewCloser(1)
-		go func() {
+		db._go(func() {
 			_ = db.flushMemtable(db.closers.memtable) // Need levels controller to be up.
-		}()
+		})
 		// Flush them to disk asap.
 		for _, mt := range db.imm {
 			db.flushChan <- flushTask{mt: mt}
@@ -377,22 +391,28 @@ func Open(opt Options) (*DB, error) {
 	db.orc.readMark.Done(db.orc.nextTxnTs)
 	db.orc.incrementNextTs()
 
-	go db.threshold.listenForValueThresholdUpdate()
+	db._go(db.threshold.listenForValueThresholdUpdate)
 
 	if err := db.initBannedNamespaces(); err != nil {
 		return db, errors.Wrapf(err, "While setting banned keys")
 	}
 
 	db.closers.writes = z.NewCloser(1)
-	go db.doWrites(db.closers.writes)
+	db._go(func() {
+		db.doWrites(db.closers.writes)
+	})
 
 	if !db.opt.InMemory {
 		db.closers.valueGC = z.NewCloser(1)
-		go db.vlog.waitOnGC(db.closers.valueGC)
+		db._go(func() {
+			db.vlog.waitOnGC(db.closers.valueGC)
+		})
 	}
 
 	db.closers.pub = z.NewCloser(1)
-	go db.pub.listenForUpdates(db.closers.pub)
+	db._go(func() {
+		db.pub.listenForUpdates(db.closers.pub)
+	})
 
 	valueDirLockGuard = nil
 	dirLockGuard = nil
@@ -937,7 +957,9 @@ func (db *DB) doWrites(lc *z.Closer) {
 		}
 
 	writeCase:
-		go writeRequests(reqs)
+		db._go(func() {
+			writeRequests(reqs)
+		})
 		reqs = make([]*request, 0, 10)
 		reqLen.Set(0)
 	}
@@ -945,7 +967,8 @@ func (db *DB) doWrites(lc *z.Closer) {
 
 // batchSet applies a list of badger.Entry. If a request level error occurs it
 // will be returned.
-//   Check(kv.BatchSet(entries))
+//
+//	Check(kv.BatchSet(entries))
 func (db *DB) batchSet(entries []*Entry) error {
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
@@ -958,19 +981,20 @@ func (db *DB) batchSet(entries []*Entry) error {
 // batchSetAsync is the asynchronous version of batchSet. It accepts a callback
 // function which is called when all the sets are complete. If a request level
 // error occurs, it will be passed back via the callback.
-//   err := kv.BatchSetAsync(entries, func(err error)) {
-//      Check(err)
-//   }
+//
+//	err := kv.BatchSetAsync(entries, func(err error)) {
+//	   Check(err)
+//	}
 func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
 		return err
 	}
-	go func() {
+	db._go(func() {
 		err := req.Wait()
 		// Write is complete. Let's call the callback function now.
 		f(err)
-	}()
+	})
 	return nil
 }
 
@@ -1524,9 +1548,9 @@ func (db *DB) startMemoryFlush() {
 	if db.closers.memtable != nil {
 		db.flushChan = make(chan flushTask, db.opt.NumMemtables)
 		db.closers.memtable = z.NewCloser(1)
-		go func() {
+		db._go(func() {
 			_ = db.flushMemtable(db.closers.memtable)
-		}()
+		})
 	}
 }
 
@@ -1544,9 +1568,9 @@ func (db *DB) Flatten(workers int) error {
 		db.opt.Infof("Attempting to compact with %+v\n", cp)
 		errCh := make(chan error, 1)
 		for i := 0; i < workers; i++ {
-			go func() {
+			db._go(func() {
 				errCh <- db.lc.doCompact(175, cp)
-			}()
+			})
 		}
 		var success int
 		var rerr error
@@ -1617,7 +1641,9 @@ func (db *DB) blockWrite() error {
 
 func (db *DB) unblockWrite() {
 	db.closers.writes = z.NewCloser(1)
-	go db.doWrites(db.closers.writes)
+	db._go(func() {
+		db.doWrites(db.closers.writes)
+	})
 
 	// Resume writes.
 	atomic.StoreInt32(&db.blockWrites, 0)
@@ -1719,16 +1745,16 @@ func (db *DB) dropAll() (func(), error) {
 }
 
 // DropPrefix would drop all the keys with the provided prefix. It does this in the following way:
-// - Stop accepting new writes.
-// - Stop memtable flushes before acquiring lock. Because we're acquring lock here
-//   and memtable flush stalls for lock, which leads to deadlock
-// - Flush out all memtables, skipping over keys with the given prefix, Kp.
-// - Write out the value log header to memtables when flushing, so we don't accidentally bring Kp
-//   back after a restart.
-// - Stop compaction.
-// - Compact L0->L1, skipping over Kp.
-// - Compact rest of the levels, Li->Li, picking tables which have Kp.
-// - Resume memtable flushes, compactions and writes.
+//   - Stop accepting new writes.
+//   - Stop memtable flushes before acquiring lock. Because we're acquring lock here
+//     and memtable flush stalls for lock, which leads to deadlock
+//   - Flush out all memtables, skipping over keys with the given prefix, Kp.
+//   - Write out the value log header to memtables when flushing, so we don't accidentally bring Kp
+//     back after a restart.
+//   - Stop compaction.
+//   - Compact L0->L1, skipping over Kp.
+//   - Compact rest of the levels, Li->Li, picking tables which have Kp.
+//   - Resume memtable flushes, compactions and writes.
 func (db *DB) DropPrefix(prefixes ...[]byte) error {
 	if len(prefixes) == 0 {
 		return nil
@@ -2055,4 +2081,23 @@ func (db *DB) LevelsToString() string {
 	}
 	b.WriteString("Level Done\n")
 	return b.String()
+}
+
+// go will start a goroutine but will also handle panics
+// by calling a PanicHandler if provided on the Options.
+func (db *DB) _go(fn func()) {
+	if db.opt.PanicHandler == nil {
+		go fn()
+		return
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				r = fmt.Sprintf("%v\n%s", r, string(debug.Stack()))
+				db.opt.PanicHandler(r)
+			}
+		}()
+		fn()
+	}()
 }

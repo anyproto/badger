@@ -305,7 +305,7 @@ func (sw *StreamWriter) newWriter(streamID uint32) (*sortedWriter, error) {
 		closer:   z.NewCloser(1),
 	}
 
-	go w.handleRequests()
+	w.db._go(w.handleRequests)
 	return w, nil
 }
 
@@ -382,10 +382,12 @@ func (w *sortedWriter) send(done bool) error {
 	if err := w.throttle.Do(); err != nil {
 		return err
 	}
-	go func(builder *table.Builder) {
-		err := w.createTable(builder)
-		w.throttle.Done(err)
-	}(w.builder)
+	w.db._go(func() {
+		func(builder *table.Builder) {
+			err := w.createTable(builder)
+			w.throttle.Done(err)
+		}(w.builder)
+	})
 	// If done is true, this indicates we can close the writer.
 	// No need to allocate underlying TableBuilder now.
 	if done {

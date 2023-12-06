@@ -112,6 +112,10 @@ type Options struct {
 	// NamespaceOffset specifies the offset from where the next 8 bytes contains the namespace.
 	NamespaceOffset int
 
+	// PanicHandler if set will forward panic payloads to the panic handler instead of panicking.
+	// It is very important that the panic handler actually handles the panics instead of ignoring them.
+	PanicHandler func(panicPayload interface{})
+
 	// Transaction start and commit timestamps are managed by end-user.
 	// This is only useful for databases built on top of Badger (like Dgraph).
 	// Not recommended for most users.
@@ -472,7 +476,8 @@ func (opt Options) WithBaseTableSize(val int64) Options {
 //
 // LevelSizeMultiplier sets the ratio between the maximum sizes of contiguous levels in the LSM.
 // Once a level grows to be larger than this ratio allowed, the compaction process will be
-//  triggered.
+//
+//	triggered.
 //
 // The default value of LevelSizeMultiplier is 10.
 func (opt Options) WithLevelSizeMultiplier(val int) Options {
@@ -510,7 +515,7 @@ func (opt Options) WithValueThreshold(val int64) Options {
 // and only 1 percent in vlog. The value threshold will be dynamically updated within the range of
 // [ValueThreshold, Options.maxValueThreshold]
 //
-// Say VLogPercentile with 1.0 means threshold will eventually set to Options.maxValueThreshold
+// # Say VLogPercentile with 1.0 means threshold will eventually set to Options.maxValueThreshold
 //
 // The default value of VLogPercentile is 0.0.
 func (opt Options) WithVLogPercentile(t float64) Options {
@@ -776,6 +781,14 @@ func (opt Options) WithDetectConflicts(b bool) Options {
 // The default value for NamespaceOffset is -1.
 func (opt Options) WithNamespaceOffset(offset int) Options {
 	opt.NamespaceOffset = offset
+	return opt
+}
+
+// WithPanicHandler returns a new Options value with PanicHandler set to the given value.
+//
+// If a PanicHandler is passed it should actually handle the panic or repanic.
+func (opt Options) WithPanicHandler(panicHandler func(panicPayload interface{})) Options {
+	opt.PanicHandler = panicHandler
 	return opt
 }
 
