@@ -1,4 +1,4 @@
-module github.com/dgraph-io/badger/v3
+module github.com/vingarcia/badger/v3
 
 go 1.12
 
@@ -6,6 +6,7 @@ go 1.12
 
 require (
 	github.com/cespare/xxhash v1.1.0
+	github.com/dgraph-io/badger/v3 v3.2103.5
 	github.com/dgraph-io/ristretto v0.1.1
 	github.com/dustin/go-humanize v1.0.0
 	github.com/gogo/protobuf v1.3.2
@@ -24,3 +25,5 @@ require (
 	golang.org/x/sys v0.0.0-20221010170243-090e33056c14
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 )
+
+replace github.com/dgraph-io/badger/v3 => ./
