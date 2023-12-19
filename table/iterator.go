@@ -18,9 +18,14 @@ package table
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"math"
+	"runtime"
+	"runtime/debug"
 	"sort"
+	"time"
 
 	"github.com/dgraph-io/badger/v3/fb"
 	"github.com/dgraph-io/badger/v3/y"
@@ -58,6 +63,7 @@ func (itr *blockIterator) setBlock(b *block) {
 	// Drop the index from the block. We don't need it anymore.
 	itr.data = b.data[:b.entriesIndexStart]
 	itr.entryOffsets = b.entryOffsets
+	fmt.Printf("table %d block %d entryOffsets %d: %v\n", itr.tableID, itr.blockID, len(itr.entryOffsets), itr.entryOffsets)
 }
 
 // setIdx sets the iterator to the entry at index i and set it's key and value.
@@ -68,6 +74,9 @@ func (itr *blockIterator) setIdx(i int) {
 		return
 	}
 	itr.err = nil
+	if itr.entryOffsets[i] > math.MaxInt32 {
+		fmt.Printf("table %d block %d idx %d entryOffsets[%d] %d\n", itr.tableID, itr.blockID, itr.idx, i, itr.entryOffsets[i])
+	}
 	startOffset := int(itr.entryOffsets[i])
 
 	// Set base key.
@@ -85,21 +94,46 @@ func (itr *blockIterator) setIdx(i int) {
 		// idx point to some entry other than the last one in the block.
 		// EndOffset of the current entry is the start offset of the next entry.
 		endOffset = int(itr.entryOffsets[itr.idx+1])
+		if itr.entryOffsets[i+1] > math.MaxInt32 {
+			fmt.Printf("table %d block %d idx %d entryOffsets[%d+1] %d\n", itr.tableID, itr.blockID, itr.idx, i, itr.entryOffsets[i+1])
+		}
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			var debugBuf bytes.Buffer
-			fmt.Fprintf(&debugBuf, "==== Recovered====\n")
-			fmt.Fprintf(&debugBuf, "Table ID: %d\nBlock ID: %d\nEntry Idx: %d\nData len: %d\n"+
+	getDebugStr := func() string {
+		d := "arch %s" + runtime.GOARCH
+		if itr != nil {
+			d += fmt.Sprintf("Table ID: %d\nBlock ID: %d\nEntry Idx: %d\nData len: %d\n"+
 				"StartOffset: %d\nEndOffset: %d\nEntryOffsets len: %d\nEntryOffsets: %v\n",
 				itr.tableID, itr.blockID, itr.idx, len(itr.data), startOffset, endOffset,
 				len(itr.entryOffsets), itr.entryOffsets)
-			panic(debugBuf.String())
+		}
+
+		return d
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("==== Badger corrupted ====")
+			fmt.Println("==== Recovered====")
+			fmt.Println(getDebugStr())
+			debug.PrintStack()
+			time.Sleep(time.Second * 5)
+			panic("exit")
 		}
 	}()
 
+	if startOffset < 0 || endOffset < 0 || startOffset > len(itr.data) || endOffset > len(itr.data) {
+		fmt.Println("==== Badger corrupted ====")
+		fmt.Println("==== 1====")
+		fmt.Println(getDebugStr())
+		debug.PrintStack()
+		time.Sleep(time.Second * 5)
+		panic("exit")
+		// probably a corrupted block
+		itr.err = y.Wrap(io.ErrUnexpectedEOF, fmt.Sprint("invalid offset: ", getDebugStr()))
+		return
+	}
 	entryData := itr.data[startOffset:endOffset]
 	var h header
+
 	h.Decode(entryData)
 	// Header contains the length of key overlap and difference compared to the base key. If the key
 	// before this one had the same or better key overlap, we can avoid copying that part into
@@ -109,6 +143,28 @@ func (itr *blockIterator) setIdx(i int) {
 	}
 	itr.prevOverlap = h.overlap
 	valueOff := headerSize + h.diff
+
+	if valueOff < 0 || int(valueOff) >= len(entryData) || int(headerSize) >= len(entryData) {
+		fmt.Printf("header size %d, h.diff %d, h.overlap %d, valueOff %d, entryData len %d cap %d itr.key len %d\n", headerSize, h.diff, h.overlap, valueOff, len(entryData), cap(entryData), len(itr.key))
+		fmt.Println("entryData")
+		fmt.Println(base64.RawStdEncoding.EncodeToString(entryData))
+
+		fmt.Println("==== Badger corrupted 2 ====")
+		fmt.Println(getDebugStr())
+
+		if len(itr.key) > 100 {
+			fmt.Printf("itr.key[0:100] %s\n", string(itr.key[0:100]))
+		} else {
+			fmt.Printf("itr.key %s\n", string(itr.key))
+
+		}
+
+		debug.PrintStack()
+		time.Sleep(time.Second * 5)
+		panic("exit")
+		itr.err = y.Wrap(io.ErrUnexpectedEOF, fmt.Sprint("invalid offset: ", getDebugStr()))
+		return
+	}
 	diffKey := entryData[headerSize:valueOff]
 	itr.key = append(itr.key[:h.overlap], diffKey...)
 	itr.val = entryData[valueOff:]

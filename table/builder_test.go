@@ -17,6 +17,7 @@
 package table
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math/rand"
 	"os"
@@ -276,4 +277,43 @@ func TestEmptyBuilder(t *testing.T) {
 	defer b.Close()
 	require.Equal(t, []byte{}, b.Finish())
 
+}
+
+func Test_header_Decode(t *testing.T) {
+	type fields struct {
+		overlap uint16
+		diff    uint16
+	}
+	type args struct {
+		buf []byte
+	}
+	b1, err := base64.RawStdEncoding.DecodeString("cmVpYWp6Zm43NTZocnVqNnZpaHBneWI3eXh3bmVxYnRqaWt3NWVwcnRwdnFlZnVwcW10aw")
+	require.NoError(t, err)
+	tests := []struct {
+		name   string
+		fields fields
+		args   args
+	}{
+		{
+			name: "test1",
+			fields: fields{
+				overlap: 25970,
+				diff:    24937,
+			},
+			args: args{
+				buf: b1,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &header{
+				overlap: tt.fields.overlap,
+				diff:    tt.fields.diff,
+			}
+			h.Decode(tt.args.buf)
+			require.Equal(t, tt.fields.overlap, h.overlap)
+			require.Equal(t, tt.fields.diff, h.diff)
+		})
+	}
 }

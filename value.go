@@ -131,6 +131,7 @@ func (r *safeRead) Entry(reader io.Reader) (*Entry, error) {
 	if cap(r.k) < kl {
 		r.k = make([]byte, 2*kl)
 	}
+	y.AssertTrue(int64(h.vlen) < math.MaxInt64)
 	vl := int(h.vlen)
 	if cap(r.v) < vl {
 		r.v = make([]byte, 2*vl)
@@ -817,6 +818,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 
 		n := uint32(buf.Len())
 		endOffset := atomic.AddUint32(&vlog.writableLogOffset, n)
+		y.AssertTrue(int64(endOffset) < math.MaxInt64)
 		// Increase the file size if we cannot accommodate this entry.
 		if int(endOffset) >= len(curlf.Data) {
 			curlf.Truncate(int64(endOffset))

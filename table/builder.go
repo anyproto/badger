@@ -18,6 +18,7 @@ package table
 
 import (
 	"crypto/aes"
+	"fmt"
 	"math"
 	"runtime"
 	"sync"
@@ -56,6 +57,7 @@ const headerSize = uint16(unsafe.Sizeof(header{}))
 func (h header) Encode() []byte {
 	var b [4]byte
 	*(*header)(unsafe.Pointer(&b[0])) = h
+	fmt.Printf("encode: unsafe.Pointer(&b[0])): %d %x; b size:%d, cap:%d; overlap %d diff %d\n", unsafe.Pointer(&b[0]), unsafe.Pointer(&b[0]), len(b), cap(b), h.overlap, h.diff)
 	return b[:]
 }
 
@@ -65,6 +67,8 @@ func (h *header) Decode(buf []byte) {
 	// pointer alignment issues. See https://github.com/dgraph-io/badger/issues/1096
 	// and comment https://github.com/dgraph-io/badger/pull/1097#pullrequestreview-307361714
 	copy(((*[headerSize]byte)(unsafe.Pointer(h))[:]), buf[:headerSize])
+	fmt.Printf("decode: unsafe.Pointer(h): %d %x; buff size:%d, cap:%d; overlap %d diff %d \n", unsafe.Pointer(h), unsafe.Pointer(h), len(buf), cap(buf), h.overlap, h.diff)
+
 }
 
 // bblock represents a block that is being compressed/encrypted in the background.

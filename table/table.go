@@ -589,7 +589,12 @@ func (t *Table) block(idx int, useCache bool) (*block, error) {
 
 	// Checksum length greater than block size could happen if the table was compressed and
 	// it was opened with an incorrect compression algorithm (or the data was corrupted).
-	if blk.chkLen > len(blk.data) {
+	if blk.chkLen < 0 {
+		// 32bit overflow
+		return nil, errors.New("invalid negative checksum length. Either the data is " +
+			"corrupted or the table options are incorrectly set")
+	}
+	if blk.chkLen > len(blk.data)-4 {
 		return nil, errors.New("invalid checksum length. Either the data is " +
 			"corrupted or the table options are incorrectly set")
 	}
@@ -600,6 +605,11 @@ func (t *Table) block(idx int, useCache bool) (*block, error) {
 	// Move back and read numEntries in the block.
 	readPos -= 4
 	numEntries := int(y.BytesToU32(blk.data[readPos : readPos+4]))
+	if numEntries < 0 {
+		// int32 overflow
+		return nil, errors.New("invalid negative number of entries. Either the data is " +
+			"corrupted or the table options are incorrectly set")
+	}
 	entriesIndexStart := readPos - (numEntries * 4)
 	entriesIndexEnd := entriesIndexStart + numEntries*4
 
@@ -809,7 +819,7 @@ func (t *Table) decompress(b *block) error {
 		if sz, err := snappy.DecodedLen(b.data); err == nil {
 			dst = z.Calloc(sz, "Table.Decompress")
 		} else {
-			dst = z.Calloc(len(b.data) * 4, "Table.Decompress") // Take a guess.
+			dst = z.Calloc(len(b.data)*4, "Table.Decompress") // Take a guess.
 		}
 		b.data, err = snappy.Decode(dst, b.data)
 		if err != nil {

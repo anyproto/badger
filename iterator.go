@@ -750,6 +750,13 @@ func (it *Iterator) prefetch() {
 // smallest key greater than the provided key if iterating in the forward direction.
 // Behavior would be reversed if iterating backwards.
 func (it *Iterator) Seek(key []byte) {
+	// recover from panic if one comparators panics
+	defer func() {
+		if r := recover(); r != nil {
+			it.Close()
+			panic(r)
+		}
+	}()
 	if it.iitr == nil {
 		return
 	}
