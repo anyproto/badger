@@ -456,8 +456,13 @@ func (t *Table) initIndex() (*fb.BlockOffset, error) {
 	// Read index.
 	readPos -= t.indexLen
 	t.indexStart = readPos
-	data := t.readNoFail(readPos, t.indexLen)
 
+	if t.indexLen == 0 && expectedChk.Sum == 0 {
+		// in case indexLen is zero and checksum is zero, verification will pass but this mean that we have corrupted data
+		return nil, fmt.Errorf("index length is 0 and checksum is empty: %s", t.Filename())
+	}
+
+	data := t.readNoFail(readPos, t.indexLen)
 	if err := y.VerifyChecksum(data, expectedChk); err != nil {
 		return nil, y.Wrapf(err, "failed to verify checksum for table: %s", t.Filename())
 	}
