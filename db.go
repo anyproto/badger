@@ -370,6 +370,10 @@ func Open(opt Options) (*DB, error) {
 			if err != nil {
 				return nil, y.Wrapf(err, "cannot rewrite manifest")
 			}
+			err = os.Remove(path)
+			if err != nil {
+				return nil, y.Wrapf(err, "cannot remove corrupted table")
+			}
 		}
 		return db, err
 	}
