@@ -26,12 +26,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	humanize "github.com/dustin/go-humanize"
+	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/badger/v4/options"
@@ -344,6 +345,32 @@ func Open(opt Options) (*DB, error) {
 
 	// newLevelsController potentially loads files in directory.
 	if db.lc, err = newLevelsController(db, &manifest); err != nil {
+		if db.opt.DeleteCorruptedTablesFromManifest && strings.Contains(err.Error(), "checksum") {
+			parts := strings.Split(err.Error(), ":")
+			lastPart := parts[len(parts)-1]
+			path := strings.TrimSpace(lastPart)
+			filename := filepath.Base(path)
+
+			// trim extension
+			filename = filename[:len(filename)-len(filepath.Ext(filename))]
+
+			tid, err := strconv.Atoi(filename)
+			if err != nil {
+				return nil, y.Wrapf(err, "cannot parse table id")
+			}
+			fmt.Println("fixing table id %v\n", tid)
+
+			m2 := manifest.clone()
+			for _, m := range m2.Levels {
+				delete(m.Tables, uint64(tid))
+			}
+			delete(m2.Tables, uint64(tid))
+			manifestFile.manifest = m2
+			err = manifestFile.rewrite()
+			if err != nil {
+				return nil, y.Wrapf(err, "cannot rewrite manifest")
+			}
+		}
 		return db, err
 	}
 

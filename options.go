@@ -49,6 +49,7 @@ type Options struct {
 	Dir      string
 	ValueDir string
 
+	DeleteCorruptedTablesFromManifest bool
 	// Usually modified options.
 
 	SyncWrites        bool
